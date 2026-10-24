@@ -1,0 +1,17 @@
+[project]
+name = "carrycode"
+version = "0.1.0"
+description = "CarryCode - a small, readable terminal code agent (Python stdlib only)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+carrycode = "carrycode.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["carrycode*"]

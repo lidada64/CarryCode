@@ -1,0 +1,31 @@
+# 密钥：永不入库（仓库是公开的）
+.env
+.env.*
+!.env.example
+
+# Python 产物
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# 本地数据（会话按设计放 ~/.carrycode/，这里只是兜底）
+sessions/
+*.jsonl
+*.log
+# 测试用的临时目录（建在仓库内，避免沙箱拒绝写工作区外的 .env）
+tests/.tmp/
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
