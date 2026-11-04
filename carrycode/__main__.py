@@ -6,8 +6,10 @@
 
 用法：
 
-    python -m carrycode "用 glob 列出所有 .py 文件，再读第一个的前 20 行"
-    .\\run-carrycode.cmd "..."
+    .\\run-carrycode.cmd                      # 进对话框，一行一条任务
+    python -m carrycode "看看这个目录"        # 一次性跑完就退出
+
+    对话框里：/help 看命令，/new 清空历史，/exit 或 Ctrl-D 退出，Ctrl-C 中断当前轮
 
 配置：先读仓库根的 .env，再用同名环境变量覆盖
 
@@ -613,11 +615,8 @@ def _describe_call(call: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def run(task: str, config: dict[str, str]) -> int:
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": [{"type": "text", "text": task}]}
-    ]
-
+def _run_steps(messages: list[dict[str, Any]], config: dict[str, str]) -> int:
+    """在已有历史上跑一轮：模型 → 工具 → 模型 …，直到 stop_reason 不是 tool_use。"""
     for _ in range(MAX_STEPS):
         data = call_model(messages, config)
         blocks = [block for block in data.get("content") or [] if isinstance(block, dict)]
@@ -663,6 +662,83 @@ def run(task: str, config: dict[str, str]) -> int:
     return 1
 
 
+def run_turn(messages: list[dict[str, Any]], task: str, config: dict[str, str]) -> int:
+    """把一条任务追加进历史再跑。
+
+    中断或请求出错时，把这一轮追加的消息全撤掉：历史停在上一轮结束的位置，
+    既不会留下「user 发了、assistant 没回」，也不会留下只调了工具没回结果的半截。
+    """
+    mark = len(messages)
+    messages.append({"role": "user", "content": [{"type": "text", "text": task}]})
+    try:
+        return _run_steps(messages, config)
+    except BaseException:
+        del messages[mark:]
+        raise
+
+
+def run(task: str, config: dict[str, str]) -> int:
+    """一次性：跑完就退出（退出码 0 完成 / 1 没跑完）。"""
+    return run_turn([], task, config)
+
+
+def _prompt() -> str:
+    """输入提示符：控制台编码放不下 › 时退回 >。"""
+    try:
+        "› ".encode(sys.stdout.encoding or "utf-8")
+    except (LookupError, UnicodeEncodeError):
+        return "> "
+    return "› "
+
+
+def repl(config: dict[str, str]) -> int:
+    """对话框：一行一条任务，历史一直留着，所以上下文能接着聊。
+
+    历史是往下追加的，前面几轮的请求开头原样不动，
+    模型服务端的前缀缓存就能接着用。
+    """
+    messages: list[dict[str, Any]] = []
+
+    print(f"● {config['model']}  ·  {config['base_url']}")
+    print("输入任务回车发送；/help 看命令，/exit 退出。")
+    print()
+
+    while True:
+        try:
+            line = input(_prompt()).strip()
+        except EOFError:
+            print()
+            return 0
+        except KeyboardInterrupt:
+            print("\n（想退出打 /exit，或按 Ctrl-D）")
+            continue
+
+        if not line:
+            continue
+        if line in {"/exit", "/quit"}:
+            return 0
+        if line == "/help":
+            print("  /help   这条帮助")
+            print("  /new    清空历史，开一段新对话（上下文从头来）")
+            print("  /exit   退出（Ctrl-D 也行）")
+            print(f"  其它输入都当任务发给模型；每轮最多 {MAX_STEPS} 次模型请求，Ctrl-C 中断当前轮。")
+            print()
+            continue
+        if line == "/new":
+            messages.clear()
+            print("（历史已清空，接着输入任务）")
+            print()
+            continue
+
+        try:
+            run_turn(messages, line, config)
+        except KeyboardInterrupt:
+            print("（已中断这一轮，历史回到中断前）", file=sys.stderr)
+        except RuntimeError as error:
+            print(f"✗ {error}", file=sys.stderr)
+        print()
+
+
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
@@ -671,9 +747,9 @@ def run(task: str, config: dict[str, str]) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="carrycode",
-        description="CarryCode - 最小 agent loop：模型可以调用 bash",
+        description="CarryCode - 最小 agent loop：5 个工具，带对话框",
     )
-    parser.add_argument("prompt", nargs="*", help="要交给模型的任务")
+    parser.add_argument("prompt", nargs="*", help="要交给模型的任务；不写就进对话框")
     parser.add_argument("--version", action="store_true", help="打印版本")
     return parser
 
@@ -691,19 +767,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     task = " ".join(args.prompt).strip()
-    if not task:
-        build_parser().print_help()
-        return 2
 
     config = load_config()
     if not config["api_key"]:
         print("缺少 ANTHROPIC_API_KEY：写进 CarryCode\\.env，或设为环境变量。", file=sys.stderr)
         return 2
 
+    if not task:
+        # 没给任务就进对话框
+        try:
+            return repl(config)
+        except KeyboardInterrupt:
+            print()
+            return 0
+
     print(f"● {config['model']}  ·  {config['base_url']}")
     print()
     try:
         return run(task, config)
+    except KeyboardInterrupt:
+        print("\n（已中断）", file=sys.stderr)
+        return 130
     except RuntimeError as error:
         print(f"✗ {error}", file=sys.stderr)
         return 1

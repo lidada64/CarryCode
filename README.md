@@ -2,16 +2,40 @@
 
 一个**只用 Python 标准库**的最小 agent loop：模型可以调用 5 个工具（`bash` / `read_file` / `write_file` / `edit_file` / `glob`），看结果，再决定下一步。
 
-全部实现就是 `carrycode/__main__.py` 一个文件。没有配置分层、没有审批、没有会话——先把「模型 ↔ 命令」这条链路跑通。
+全部实现就是 `carrycode/__main__.py` 一个文件。没有配置分层、没有审批、没有落盘的会话——历史和上下文只在内存里。
 
 ## 跑起来
 
 ```powershell
 cd CarryCode
-.\run-carrycode.cmd "用 glob 找出所有 .py 文件，读出 carrycode 里最大的那个的前 20 行"
+.\run-carrycode.cmd
 ```
 
-等价写法（仓库根目录下）：
+不带任务参数就进对话框，一行一条任务：
+
+```
+● deepseek-v4-flash  ·  https://api.deepseek.com/anthropic
+输入任务回车发送；/help 看命令，/exit 退出。
+
+› 用 glob 找出所有 .py 文件，读出最大的那个的前 20 行
+→ glob: {"pattern": "**/*.py"}
+← ok · 156 字符
+…
+
+› 把刚才那个文件第 3 行的注释改成中文
+（接着上一轮的上下文，不用重新说一遍）
+```
+
+| 命令 | 作用 |
+|---|---|
+| `/help` | 看命令 |
+| `/new` | 清空历史，开一段新对话 |
+| `/exit`（或 Ctrl-D） | 退出 |
+| Ctrl-C | 中断当前这一轮，历史回到中断前 |
+
+历史一直留在同一个 `messages` 里，所以后面几轮能接着前面聊；请求开头那段原样不动，也能接着吃前缀缓存。
+
+也可以一次性跑完就退出：
 
 ```powershell
 python -m carrycode "看看当前目录有什么文件"
@@ -60,7 +84,7 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 ## 现在没有
 
 - **审批**：命令、写文件都会直接执行，只打印 `→ 工具名: 参数` 让你看见；想拦就 Ctrl-C。
-- REPL / 会话持久化 / 流式输出 / 单测 / 大结果外置到文件。
+- 会话持久化（历史只在内存里，退出就没了）/ 流式输出 / 单测 / 大结果外置到文件。
 - Unix 语义：Windows 上命令走 `cmd`，`ls` 会失败，用 `dir` 或 `python`。
 
 ## 文件
