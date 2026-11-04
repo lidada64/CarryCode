@@ -33,7 +33,7 @@ ANTHROPIC_MODEL=deepseek-v4-flash
 
 1. 把任务、系统提示、`bash` 工具定义发给模型；
 2. 模型返回 `tool_use` 就执行命令，把退出码和输出作为 `tool_result` 回传；
-3. 重复直到模型不再调工具，打印最终回答；最多 20 步。
+3. 重复直到 `stop_reason` 不是 `tool_use`，打印最终回答；最多 5 步。
 
 assistant 的原始 content blocks（含 thinking）原样进历史——DeepSeek 的 Anthropic 兼容端点要求这样回传。
 

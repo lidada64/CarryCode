@@ -2,7 +2,7 @@
 
 一轮任务：
 
-    用户 → 模型 → 模型要调 bash → 本机执行 → 结果回传 → 模型继续 → 直到它不再调工具
+    用户 → 模型 → stop_reason=tool_use → 执行 bash → 结果回传 → 模型继续 → 直到 stop_reason 不是 tool_use
 
 用法：
 
@@ -40,7 +40,7 @@ DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_MODEL = "claude-sonnet-4-5"
 MAX_TOKENS = 8192
 
-MAX_STEPS = 20  # 一回合最多几次模型请求，防止死循环
+MAX_STEPS = 5  # 一回合最多 5 次模型请求：stop_reason 不是 tool_use 就停
 COMMAND_TIMEOUT = 120  # 单条命令超时（秒）
 OUTPUT_LIMIT = 12_000  # 回给模型的单条输出上限（字符）
 
@@ -223,21 +223,30 @@ def run(task: str, config: dict[str, str]) -> int:
         blocks = [block for block in data.get("content") or [] if isinstance(block, dict)]
         tool_calls = [block for block in blocks if block.get("type") == "tool_use"]
         text = _text_of(blocks)
+        stop_reason = data.get("stop_reason")
 
         if text:
             print(text)
-            if tool_calls:
+            if stop_reason == "tool_use":
                 print()
 
         # assistant 的原始 blocks（含 thinking 与 tool_use）原样入历史，
         # DeepSeek 的 Anthropic 兼容端点要求这样回传。
         messages.append({"role": "assistant", "content": blocks})
 
-        if not tool_calls:
+        # 边界只看 stop_reason：tool_use 表示「还要调工具」，其余都收尾。
+        if stop_reason != "tool_use":
             if not text:
-                print(f"（模型没有返回文本，stop_reason={data.get('stop_reason')}）", file=sys.stderr)
+                print(f"（没有文本，stop_reason={stop_reason}）", file=sys.stderr)
+                return 1
+            if stop_reason == "max_tokens":
+                print("（输出被 max_tokens 截断，本轮不算完成）", file=sys.stderr)
                 return 1
             return 0
+
+        if not tool_calls:
+            print("（stop_reason=tool_use，但没有 tool_use 块）", file=sys.stderr)
+            return 1
 
         results: list[dict[str, Any]] = []
         for call in tool_calls:
