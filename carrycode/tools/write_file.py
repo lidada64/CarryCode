@@ -7,6 +7,8 @@ from typing import Any
 from .base import resolve_path, write_text
 
 NAME = "write_file"
+RISK = "write"  # 会改动文件
+PATHS = ("path",)  # 这个入参受工作区约束
 
 SCHEMA = {
     "description": (
@@ -56,6 +58,19 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
     except OSError as error:
         return f"写不了 {path}：{error}", True
 
-    # 行数和 read_file 的算法对齐：结尾的换行不算新的一行
-    lines = 0 if not content else content.count("\n") + (0 if content.endswith("\n") else 1)
-    return f"已写入 {path}：{lines} 行，{size} 字节。", False
+    return f"已写入 {path}：{_line_count(content)} 行，{size} 字节。", False
+
+
+def _line_count(content: str) -> int:
+    """行数和 read_file 的算法对齐：结尾的换行不算新的一行。"""
+    return 0 if not content else content.count("\n") + (0 if content.endswith("\n") else 1)
+
+
+def preview(args: dict[str, Any]) -> list[str]:
+    """审批块里给人看的那两行。只读，不碰文件。"""
+    path = str(args.get("path") or "").strip()
+    content = args.get("content")
+    if not isinstance(content, str):
+        return [f"文件: {path}", "（content 不是文本，这次会被拒绝）"]
+    verb = "整份覆盖" if resolve_path(path).exists() else "新建"
+    return [f"文件: {path}", f"{verb}：{_line_count(content)} 行"]

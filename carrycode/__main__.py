@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .permissions import Permissions
 from .tools import TOOL_SCHEMAS, dispatch
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # 仓库根，.env 在这里
@@ -175,12 +176,32 @@ def _describe_call(call: dict[str, Any]) -> str:
     return f"{name}: {detail}"
 
 
+def _ask_permission(request) -> str:
+    """屏幕上问一次审批。只负责显示和读一个答案，判断全在 permissions.py。"""
+    print()
+    print(request.question)
+    for line in request.lines:
+        print(f"  {line}")
+    if "a" in request.options:
+        print(f"  a = 本会话不再问：{request.remember_label}")
+    shown = "/".join("N" if option == "n" else option for option in request.options)
+    try:
+        answer = input(f"[{shown}] ").strip().lower()
+    except EOFError:
+        answer = "n"
+    return answer or "n"
+
+
 # ---------------------------------------------------------------------------
 # 循环：模型 ↔ 工具，直到模型不再调工具
 # ---------------------------------------------------------------------------
 
 
-def _run_steps(messages: list[dict[str, Any]], config: dict[str, str]) -> int:
+def _run_steps(
+    messages: list[dict[str, Any]],
+    config: dict[str, str],
+    permissions: Permissions,
+) -> int:
     """在已有历史上跑一轮：模型 → 工具 → 模型 …，直到 stop_reason 不是 tool_use。"""
     for _ in range(MAX_STEPS):
         data = call_model(messages, config)
@@ -215,7 +236,7 @@ def _run_steps(messages: list[dict[str, Any]], config: dict[str, str]) -> int:
         results: list[dict[str, Any]] = []
         for call in tool_calls:
             print(f"→ {_describe_call(call)}")
-            result = dispatch(call)
+            result = dispatch(call, permissions)
             mark = "失败" if result["is_error"] else "ok"
             print(f"← {mark} · {len(result['content'])} 字符")
             results.append(result)
@@ -227,7 +248,12 @@ def _run_steps(messages: list[dict[str, Any]], config: dict[str, str]) -> int:
     return 1
 
 
-def run_turn(messages: list[dict[str, Any]], task: str, config: dict[str, str]) -> int:
+def run_turn(
+    messages: list[dict[str, Any]],
+    task: str,
+    config: dict[str, str],
+    permissions: Permissions,
+) -> int:
     """把一条任务追加进历史再跑。
 
     中断或请求出错时，把这一轮追加的消息全撤掉：历史停在上一轮结束的位置，
@@ -236,15 +262,15 @@ def run_turn(messages: list[dict[str, Any]], task: str, config: dict[str, str]) 
     mark = len(messages)
     messages.append({"role": "user", "content": [{"type": "text", "text": task}]})
     try:
-        return _run_steps(messages, config)
+        return _run_steps(messages, config, permissions)
     except BaseException:
         del messages[mark:]
         raise
 
 
-def run(task: str, config: dict[str, str]) -> int:
+def run(task: str, config: dict[str, str], permissions: Permissions) -> int:
     """一次性：跑完就退出（退出码 0 完成 / 1 没跑完）。"""
-    return run_turn([], task, config)
+    return run_turn([], task, config, permissions)
 
 
 def _prompt() -> str:
@@ -256,7 +282,7 @@ def _prompt() -> str:
     return "› "
 
 
-def repl(config: dict[str, str]) -> int:
+def repl(config: dict[str, str], permissions: Permissions) -> int:
     """对话框：一行一条任务，历史一直留着，所以上下文能接着聊。
 
     历史是往下追加的，前面几轮的请求开头原样不动，
@@ -264,7 +290,7 @@ def repl(config: dict[str, str]) -> int:
     """
     messages: list[dict[str, Any]] = []
 
-    print(f"● {config['model']}  ·  {config['base_url']}")
+    print(f"● {config['model']}  ·  {config['base_url']}  ·  {permissions.mode}")
     print("输入任务回车发送；/help 看命令，/exit 退出。")
     print()
 
@@ -296,7 +322,7 @@ def repl(config: dict[str, str]) -> int:
             continue
 
         try:
-            run_turn(messages, line, config)
+            run_turn(messages, line, config, permissions)
         except KeyboardInterrupt:
             print("（已中断这一轮，历史回到中断前）", file=sys.stderr)
         except RuntimeError as error:
@@ -316,6 +342,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("prompt", nargs="*", help="要交给模型的任务；不写就进对话框")
     parser.add_argument("--version", action="store_true", help="打印版本")
+    parser.add_argument("--yes", action="store_true", help="常规审批不问，直接执行（风险自负）")
+    parser.add_argument("--readonly", action="store_true", help="只读：写和执行一律拒绝")
+    parser.add_argument("--allow-outside", action="store_true", help="放开工作区边界（写和读都放）")
     return parser
 
 
@@ -338,18 +367,30 @@ def main(argv: list[str] | None = None) -> int:
         print("缺少 ANTHROPIC_API_KEY：写进 CarryCode\\.env，或设为环境变量。", file=sys.stderr)
         return 2
 
+    if args.yes and args.readonly:
+        print("--yes 和 --readonly 不能同时用。", file=sys.stderr)
+        return 2
+
+    mode = "readonly" if args.readonly else ("auto" if args.yes else "ask")
+    permissions = Permissions(
+        mode=mode,
+        asker=_ask_permission,
+        workspace=Path.cwd(),
+        allow_outside=args.allow_outside,
+    )
+
     if not task:
         # 没给任务就进对话框
         try:
-            return repl(config)
+            return repl(config, permissions)
         except KeyboardInterrupt:
             print()
             return 0
 
-    print(f"● {config['model']}  ·  {config['base_url']}")
+    print(f"● {config['model']}  ·  {config['base_url']}  ·  {permissions.mode}")
     print()
     try:
-        return run(task, config)
+        return run(task, config, permissions)
     except KeyboardInterrupt:
         print("\n（已中断）", file=sys.stderr)
         return 130

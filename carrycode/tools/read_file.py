@@ -7,6 +7,8 @@ from typing import Any
 from .base import as_int, read_text, resolve_path
 
 NAME = "read_file"
+RISK = "read"  # 只读，不改任何东西
+PATHS = ("path",)  # 这个入参受工作区约束
 READ_LIMIT = 200  # 默认读多少行
 MAX_READ_BYTES = 10 * 1024 * 1024  # 超过 10MB 的文件不让整份读
 MAX_LINE_CHARS = 2_000  # 单行太长就截断，免得一行吃掉整个输出

@@ -8,6 +8,7 @@ from typing import Any
 from .base import SKIP_DIRS, as_int
 
 NAME = "glob"
+RISK = "read"  # 只列文件名，不读内容
 GLOB_LIMIT = 100  # 默认最多列多少个文件
 
 SCHEMA = {

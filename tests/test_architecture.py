@@ -1,4 +1,5 @@
-"""架构约束：工具层只能往下 import；清单顺序固定；每个工具三件套齐全。
+"""架构约束：工具层只能往下 import；清单顺序固定；每个工具三件套齐全；
+每个工具自己声明风险档与受约束的路径入参（安全账本）。
 
 跑法（在 CarryCode 仓库根）：
 
@@ -10,13 +11,29 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from carrycode.tools import TOOL_SCHEMAS
+from carrycode.tools import TOOL_SCHEMAS, TOOLS
+from carrycode.tools.tool import RISK_LEVELS
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "carrycode" / "tools"
 
 # 顺序 = 发给模型的顺序。改这里等于改请求开头，会让服务端记住的前缀失效，
 # 所以顺序变化必须是一次明确的、有人盯着的变更。
 EXPECTED_ORDER = ["bash", "read_file", "write_file", "edit_file", "glob", "grep"]
+
+# 安全账本：每个工具说自己多危险、哪些入参受工作区约束。
+# 这张表就是审批的基础，改它等于改安全边界，必须是一次有人盯着的变更。
+#   read  只读；write 改文件；exec 执行命令；irreversible 不可撤销
+EXPECTED_LEDGER = {
+    "bash": ("exec", ()),
+    "read_file": ("read", ("path",)),
+    "write_file": ("write", ("path",)),
+    "edit_file": ("write", ("path",)),
+    "glob": ("read", ()),
+    "grep": ("read", ("path",)),
+}
+
+# 这几个文件是册子、公共件和命令知识，不是具体工具，不要求写 RISK
+NOT_TOOLS = {"__init__.py", "base.py", "tool.py", "commands.py"}
 
 # 工具层往上指的两写法：相对导入超过一层（from ..），或者直接 import 包本身
 UPWARD_IMPORTS = ("from ..", "import carrycode")
@@ -44,6 +61,35 @@ class ToolsLayeringTest(unittest.TestCase):
             schema = spec.get("input_schema") or {}
             self.assertEqual(schema.get("type"), "object", f"{name} 的 input_schema 不是 object")
             self.assertTrue(schema.get("properties"), f"{name} 没有定义任何参数")
+
+
+class SecurityLedgerTest(unittest.TestCase):
+    def test_ledger_matches_expectation(self):
+        actual = {name: (spec["risk"], spec["paths"]) for name, spec in TOOLS.items()}
+        self.assertEqual(actual, EXPECTED_LEDGER)
+
+    def test_risk_levels_are_known(self):
+        for name, spec in TOOLS.items():
+            self.assertIn(spec["risk"], RISK_LEVELS, f"{name} 的 risk 不在允许值里")
+
+    def test_every_tool_declares_risk_explicitly(self):
+        """不许靠 register() 的缺省值过日子：缺省值是兜底，不是声明。"""
+        for path in sorted(TOOLS_DIR.glob("*.py")):
+            if path.name in NOT_TOOLS:
+                continue
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("RISK = ", source, f"{path.name} 没写 RISK")
+
+    def test_preview_is_read_only(self):
+        """审批块的内容由工具自己算，但它不许写文件：只查有没有写操作的调用。"""
+        for name, spec in TOOLS.items():
+            preview = spec["preview"]
+            if preview is None:
+                continue
+            source = (TOOLS_DIR / f"{name}.py").read_text(encoding="utf-8")
+            body = source.split("def preview", 1)[1]
+            for banned in ("write_text(", ".write_bytes(", ".unlink(", ".mkdir(", "subprocess"):
+                self.assertNotIn(banned, body, f"{name}.preview 里出现了写操作：{banned}")
 
 
 if __name__ == "__main__":

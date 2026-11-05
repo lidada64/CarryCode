@@ -6,9 +6,11 @@ import os
 import subprocess
 from typing import Any
 
+from . import commands
 from .base import MAX_OUTPUT_CHARS
 
 NAME = "bash"
+RISK = "exec"  # 能执行任意命令：有副作用；具体多危险要看这一次的命令（阶段 1 由 inspect 细化）
 COMMAND_TIMEOUT = 120  # 单条命令超时（秒）
 
 SCHEMA = {
@@ -57,3 +59,16 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
     if len(output) > MAX_OUTPUT_CHARS:
         output = output[:MAX_OUTPUT_CHARS] + f"\n…[truncated {len(output) - MAX_OUTPUT_CHARS} chars]"
     return output, completed.returncode != 0
+
+
+def inspect(args: dict[str, Any]) -> tuple[str, list[str]]:
+    """这一次到底多危险：返回 (档位, 审批块正文)。
+
+    档位可能是 read / exec / irreversible / forbidden。
+    看不懂的命令不猜，按 exec 走常规审批——猜错方向可能是"把危险的说轻"。
+    """
+    command = str(args.get("command") or "")
+    verdict = commands.classify(command)
+    if verdict is not None:
+        return verdict.level, verdict.lines
+    return "exec", [f"命令: {command.strip()}"]

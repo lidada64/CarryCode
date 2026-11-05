@@ -20,7 +20,16 @@ _MODULES = (
 )
 
 for _module in _MODULES:
-    register(_module.NAME, _module.SCHEMA, _module.run)
+    register(
+        _module.NAME,
+        _module.SCHEMA,
+        _module.run,
+        # 四个可选声明，工具没写就用缺省值；缺省的 risk 是 write（要问）
+        risk=getattr(_module, "RISK", "write"),
+        paths=getattr(_module, "PATHS", ()),
+        preview=getattr(_module, "preview", None),
+        inspect=getattr(_module, "inspect", None),
+    )
 
 TOOL_SCHEMAS = build_schemas()
 

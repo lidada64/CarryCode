@@ -7,6 +7,8 @@ from typing import Any
 from .base import read_text, resolve_path, write_text
 
 NAME = "edit_file"
+RISK = "write"  # 会改动文件
+PATHS = ("path",)  # 这个入参受工作区约束
 
 SCHEMA = {
     "description": (
@@ -60,7 +62,7 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
     except OSError as error:
         return f"读不了 {path}：{error}", True
 
-    occurrences = text.count(old)
+    line_number, occurrences = locate(text, old)
     if occurrences == 0:
         return (
             f"在 {path} 里找不到 old_string。注意缩进、空格、换行要和文件完全一致；"
@@ -76,8 +78,6 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
             True,
         )
 
-    first = text.index(old)
-    line_number = text.count("\n", 0, first) + 1
     updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
 
     try:
@@ -87,3 +87,40 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
 
     changed = occurrences if replace_all else 1
     return f"已修改 {path}：替换 {changed} 处（起始第 {line_number} 行）。", False
+
+
+def locate(text: str, old: str) -> tuple[int, int]:
+    """在一段文本里定位 old：返回 (起始行号, 命中次数)。纯函数，不碰文件。"""
+    occurrences = text.count(old)
+    if occurrences == 0:
+        return 0, 0
+    return text.count("\n", 0, text.index(old)) + 1, occurrences
+
+
+def _line_of(text: str, line_number: int) -> str:
+    lines = text.splitlines()
+    if 1 <= line_number <= len(lines):
+        return lines[line_number - 1].strip()
+    return ""
+
+
+def preview(args: dict[str, Any]) -> list[str]:
+    """审批块里给人看的那几行：要改哪个文件的第几行。只读，不碰文件。"""
+    path = str(args.get("path") or "").strip()
+    lines = [f"文件: {path}"]
+    old = args.get("old_string")
+    if not path or not isinstance(old, str) or not old:
+        return lines
+    try:
+        text, _ = read_text(resolve_path(path))
+    except OSError:
+        return lines + ["（读不到这个文件，预先定位不了）"]
+
+    line_number, occurrences = locate(text, old)
+    if occurrences == 0:
+        return lines + ["原文没找到：这次会被拒绝，先 read_file 看一眼"]
+    if occurrences == 1:
+        return lines + [f"唯一匹配：第 {line_number} 行  {_line_of(text, line_number)}"]
+    if args.get("replace_all"):
+        return lines + [f"出现 {occurrences} 次：全部替换，起始第 {line_number} 行"]
+    return lines + [f"原文出现 {occurrences} 次：不唯一，会被拒绝"]

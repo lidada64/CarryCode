@@ -8,9 +8,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import SKIP_DIRS, as_int, resolve_path
+from .base import SKIP_DIRS, as_int, resolve_path, secret_name_reason
 
 NAME = "grep"
+RISK = "read"  # 只读，不改任何东西
+PATHS = ("path",)  # 这个入参受工作区约束
 GREP_LIMIT = 100  # 默认最多返回多少条
 MAX_FILE_BYTES = 2 * 1024 * 1024  # 单个文件超过 2MB 不搜
 MAX_LINE_CHARS = 300  # 命中的行太长就截断
@@ -67,12 +69,17 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
     hits: list[tuple[str, int, str]] = []
     scanned = 0
     skipped_binary = 0
+    skipped_secret = 0
     truncated = False
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name not in SKIP_DIRS)
         for filename in sorted(filenames):
             if name_filter and not fnmatch.fnmatch(filename, name_filter):
+                continue
+            # 禁区文件不当成搜索素材：跳过 .env、私钥这类（内容读到就进上下文）
+            if secret_name_reason(filename):
+                skipped_secret += 1
                 continue
             full = Path(dirpath) / filename
             try:
@@ -104,6 +111,8 @@ def run(args: dict[str, Any]) -> tuple[str, bool]:
 
     if not hits:
         extra = f"，跳过 {skipped_binary} 个二进制文件" if skipped_binary else ""
+        if skipped_secret:
+            extra += f"，跳过 {skipped_secret} 个禁区文件"
         return f"没有匹配 {pattern} 的内容（搜了 {scanned} 个文件{extra}）。", False
 
     hits.sort(key=lambda item: (item[0], item[1]))
