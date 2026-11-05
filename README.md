@@ -2,7 +2,7 @@
 
 一个**只用 Python 标准库**的最小 agent loop：模型可以调用 6 个工具（`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `grep`），看结果，再决定下一步。
 
-没有配置分层、没有审批、没有落盘的会话——历史和上下文只在内存里。入口在 `carrycode/__main__.py`，工具都在 `carrycode/tools/` 下，一个工具一个文件。
+没有配置分层、没有落盘的会话——历史和上下文只在内存里。入口在 `carrycode/__main__.py`，工具都在 `carrycode/tools/` 下，一个工具一个文件，审批在 `carrycode/permissions.py`。
 
 ## 跑起来
 
@@ -67,6 +67,33 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 
 要停用某个工具，在 `dispatch()` 里拒绝并返回结果，不要从册子里删：删掉会改变发出去的说明，等于每次请求都换个开头。
 
+## 审批
+
+写文件、改文件、执行命令之前都会问一句；看文件、找文件不问。
+
+| 用法 | 行为 |
+|---|---|
+| 默认 | 有副作用的调用先问 `[y/a/N/d]` |
+| `--readonly` | 写和执行一律拒，一个字节都不改 |
+| `--yes` | 常规调用不问；**不可逆命令仍然问一次**（只给 `y/N`） |
+| `--allow-outside` | 放开工作区边界（写和读都放） |
+
+```
+要执行一条不可撤销的命令，允许吗？
+  命令: git push
+  会失去：这次提交留在本机的独占权
+  能不能恢复：能，但要别人配合；CI 可能已经跑过
+  影响范围：远端仓库，不只是本机
+  更安全的做法：先 git log 看一眼要推什么
+  [y/N]
+```
+
+三类东西**不问、直接拒**：禁令（`sudo`、`rm -rf`、`format`、`shutdown`）、禁区文件（`.env`、`~/.ssh`、`*.pem`；`.env.example` 可以读）、写越界（只有 `--allow-outside` 能开）。
+
+`a` / `d` 记住的是"这一类"：`write_file` 按工具名，`bash` 按命令的第一个词（`git`、`npm`）。**不可逆命令和出工作区的读不吃这套记忆**，每次都要问。
+
+判定全在 `permissions.py`；工具只负责说"我有多危险"（`RISK` / `inspect()` / `preview()`），不决定问不问。禁令表防手滑，不防蓄意绕——`python -c "import shutil; shutil.rmtree('.')"` 抓不到，这点要知道。
+
 ## 工具
 
 | 工具 | 干什么 | 关键参数 |
@@ -84,7 +111,6 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 
 ## 现在没有
 
-- **审批**：命令、写文件都会直接执行，只打印 `→ 工具名: 参数` 让你看见；想拦就 Ctrl-C。
 - 会话持久化（历史只在内存里，退出就没了）/ 流式输出 / 大结果外置到文件。
 - Unix 语义：Windows 上命令走 `cmd`，`ls` 会失败，用 `dir` 或 `python`。
 
@@ -102,24 +128,32 @@ python -m unittest discover -s tests -t .
 CarryCode\
 ├─ carrycode\
 │  ├─ __init__.py          版本号
-│  ├─ __main__.py          入口：配置、系统提示、请求、回合循环、对话框
+│  ├─ __main__.py          入口：配置、系统提示、请求、回合循环、对话框、审批的显示
+│  ├─ permissions.py       审批：三档模式 + 边界 + 记忆，十步判定链（不 print、不 input）
 │  └─ tools\
 │     ├─ __init__.py       装配：装哪几个工具、按什么顺序（唯一能改顺序的地方）
 │     ├─ tool.py           花名册 + dispatch（不认识任何具体工具）
-│     ├─ base.py           公共件：路径、文本读写、参数兜底（不 import 任何东西）
+│     ├─ base.py           公共件：路径、文本读写、参数兜底、禁区表（不 import 任何东西）
+│     ├─ commands.py       命令串的知识：切词、找命令名、禁令表、不可逆表
 │     ├─ bash.py           每个工具一个文件，里面是 NAME / SCHEMA / run 三件套
-│     ├─ read_file.py
+│     ├─ read_file.py      外加可选的 RISK / PATHS / preview / inspect
 │     ├─ write_file.py
 │     ├─ edit_file.py
 │     ├─ glob.py
 │     └─ grep.py
 ├─ tests\
 │  ├─ __init__.py
-│  └─ test_architecture.py 架构约束：不许反向 import、顺序固定、三件套齐全
+│  ├─ test_architecture.py 架构约束：不许反向 import、顺序固定、安全账本
+│  └─ test_permissions.py  审批：全程无终端，用假 asker 断言"问没问、允不允许"
+├─ docs\permission-design.md  审批的设计与决策记录（D1–D6）
 ├─ .env.example            密钥模板
 ├─ run-carrycode.cmd       一键启动，可在任意目录运行
 └─ pyproject.toml          包元数据
 ```
+
+加一个工具 = 新建 `tools/<名字>.py`（`NAME` / `SCHEMA` / `run` 三件套 + 一行 `RISK`）+ 在 `tools/__init__.py` 的 `_MODULES` 末尾加一行，其它文件一个字不用动。
+
+忘了写 `RISK` 会被测试抓住；而且 `register()` 的缺省值落在"要问"那一边，不会静默放行。
 
 加一个工具 = 新建 `tools/<名字>.py`（`NAME` / `SCHEMA` / `run`）+ 在 `tools/__init__.py` 的 `_MODULES` 末尾加一行，其它文件一个字不用动。
 
