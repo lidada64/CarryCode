@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from . import bash, edit_file, glob, grep, read_file, write_file
+from . import bash, edit_file, glob, grep, read_file, update_plan, write_file
 from .tool import TOOLS, build_schemas, dispatch, register
 
 # 顺序 = 发给模型的顺序。新工具追加到末尾，不要插到中间。
@@ -17,6 +17,7 @@ _MODULES = (
     edit_file,
     glob,
     grep,
+    update_plan,
 )
 
 for _module in _MODULES:
@@ -33,4 +34,4 @@ for _module in _MODULES:
 
 TOOL_SCHEMAS = build_schemas()
 
-__all__ = ["TOOL_SCHEMAS", "TOOLS", "dispatch"]
+__all__ = ["TOOL_SCHEMAS", "TOOLS", "dispatch", "update_plan"]

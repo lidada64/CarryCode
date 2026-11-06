@@ -1,8 +1,8 @@
 # CarryCode
 
-一个**只用 Python 标准库**的最小 agent loop：模型可以调用 6 个工具（`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `grep`），看结果，再决定下一步。
+一个**只用 Python 标准库**的最小 agent loop：模型可以调用 7 个工具（`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `grep` / `update_plan`），看结果，再决定下一步。
 
-没有配置分层、没有落盘的会话——历史和上下文只在内存里。入口在 `carrycode/__main__.py`，工具都在 `carrycode/tools/` 下，一个工具一个文件，审批在 `carrycode/permissions.py`。
+没有配置分层、没有落盘的会话——历史和上下文只在内存里，计划也一样。入口在 `carrycode/__main__.py`，工具都在 `carrycode/tools/` 下，一个工具一个文件，审批在 `carrycode/permissions.py`。
 
 ## 跑起来
 
@@ -29,9 +29,10 @@ cd CarryCode
 | 命令 | 作用 |
 |---|---|
 | `/help` | 看命令 |
-| `/new` | 清空历史，开一段新对话 |
+| `/plan` | 看当前计划（只读，不打印到聊天记录里） |
+| `/new` | 清空历史和计划，开一段新对话 |
 | `/exit`（或 Ctrl-D） | 退出 |
-| Ctrl-C | 中断当前这一轮，历史回到中断前 |
+| Ctrl-C | 中断当前这一轮，历史回到中断前（计划不回退） |
 
 历史一直留在同一个 `messages` 里，所以后面几轮能接着前面聊；请求开头那段原样不动，也能接着吃前缀缓存。
 
@@ -55,11 +56,29 @@ ANTHROPIC_MODEL=deepseek-v4-flash
 
 ## 它怎么工作
 
-1. 把任务、系统提示、6 个工具的定义发给模型；
+1. 把任务、系统提示、7 个工具的定义发给模型；
 2. 模型返回 `tool_use` 就交给 `dispatch()`：查名字、跑函数、把结果变成 `tool_result` 回传；
 3. 重复直到 `stop_reason` 不是 `tool_use`，打印最终回答；最多 5 步。
 
 assistant 的原始 content blocks（含 thinking）原样进历史——DeepSeek 的 Anthropic 兼容端点要求这样回传。
+
+### 计划
+
+三个组件各管一件事，谁都不兼职：
+
+| 组件 | 文件 | 职责 |
+|---|---|---|
+| `PlanManager` | `carrycode/plan.py` | 存清单、校验、通知订阅者 |
+| `update_plan` | `carrycode/tools/update_plan.py` | 模型改清单的唯一入口 |
+| `with_plan_context` | `carrycode/plan_context.py` | 把最新清单拼进这一次请求的 system |
+
+模型每次提交**完整清单**：已有条目带上原来的 `id`，新条目不带 `id`；同一时间最多一个 `in_progress`；空数组表示清空。不认识的 `id`、缺 `title`、`status` 写错都会被拒，而且拒的时候内部状态一个字段都不动。
+
+清单**不塞进 messages**：每次调用模型前重新读一份快照拼到 system 末尾。所以历史保持只追加（前缀缓存还能用），压缩掉多少也不影响清单，会话日志里也不会越积越多旧副本。
+
+计划只活在内存里：`/new` 一起清空；以后加 `--resume` 时只恢复对话，不恢复计划。没有计划时，一条用户提示进来的第一份请求会带一句"当前没有计划。多步骤任务可使用 update_plan；简单任务直接执行。"，之后同一轮不再重复。
+
+界面要看进度就读 `PlanManager` 的快照（`/plan` 就是这么做的），不要去聊天记录里解析。
 
 ### 回答的渲染
 
@@ -136,6 +155,7 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 | `edit_file` | 把一段**唯一出现**的原文替换掉 | `path`、`old_string`、`new_string`、`replace_all` |
 | `glob` | 按模式找文件，按路径排序 | `pattern`、`limit`（默认 100） |
 | `grep` | 按正则搜文件内容，返回「路径:行号: 内容」 | `pattern`、`path`、`glob`、`limit`（默认 100） |
+| `update_plan` | 整张换掉当前会话的待办清单 | `todos`（每项 `title`、`status`，已有项再带 `id`） |
 
 `edit_file` 的 `old_string` 必须和文件里的字符完全一致（含缩进和换行）；找不到、或者出现多次，都直接作为错误结果返回，让模型自己补上下文——不去猜改哪一处。CRLF 的文件会自动保住原来的行尾。
 
@@ -143,7 +163,8 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 
 ## 现在没有
 
-- 会话持久化（历史只在内存里，退出就没了）/ 流式输出 / 大结果外置到文件。
+- 会话持久化（历史只在内存里，退出就没了）；计划同理，新会话从空清单开始。
+- 流式输出 / 大结果外置到文件。
 - Unix 语义：Windows 上命令走 `cmd`，`ls` 会失败，用 `dir` 或 `python`。
 
 ## 跑测试
@@ -152,7 +173,7 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 python -m unittest discover -s tests -t .
 ```
 
-现在有三组：架构约束（工具层不许反向 import、工具顺序固定、每个工具都有说明和参数）、审批判定（假 asker，断言问没问、允不允许）、会话报告与钩子（不联网，断言统计和 markdown 拼得对）。
+现在有五组：架构约束（工具层不许反向 import、工具顺序固定、每个工具都有说明和参数）、审批判定（假 asker，断言问没问、允不允许）、会话报告与钩子（不联网，断言统计和 markdown 拼得对）、计划状态（整表替换、id 规则、校验失败不动状态）、循环里的计划（假模型，断言每份请求带的是最新清单、空计划只催一次、注入不进历史）。
 
 ## 文件
 
@@ -161,6 +182,8 @@ CarryCode\
 ├─ carrycode\
 │  ├─ __init__.py          版本号
 │  ├─ __main__.py          入口：配置、系统提示、请求、回合循环、对话框、审批的显示
+│  ├─ plan.py              计划状态：PlanManager（存、校验、订阅）
+│  ├─ plan_context.py      把最新清单拼进 system（with_plan_context）
 │  ├─ permissions.py       审批：三档模式 + 边界 + 记忆，十步判定链（不 print、不 input）
 │  ├─ hooks.py             生命周期钩子：session_start / session_end，出错不影响主流程
 │  ├─ render.py            回答的 markdown 渲染：rich 可用就排版，否则纯文本兜底
@@ -175,11 +198,16 @@ CarryCode\
 │     ├─ write_file.py
 │     ├─ edit_file.py
 │     ├─ glob.py
-│     └─ grep.py
+│     ├─ grep.py
+│     └─ update_plan.py
 ├─ tests\
 │  ├─ __init__.py
 │  ├─ test_architecture.py 架构约束：不许反向 import、顺序固定、安全账本
 │  ├─ test_permissions.py  审批：全程无终端，用假 asker 断言"问没问、允不允许"
+│  ├─ test_plan.py         计划状态：整表替换、id 规则、订阅、重置
+│  ├─ test_plan_context.py 注入：空计划只提一句、有计划就带最新清单
+│  ├─ test_plan_loop.py    循环与对话框：假模型，断言每份请求的 system
+│  ├─ test_plan_tool.py    update_plan：接参、错误结果、未绑定时的兜底
 │  ├─ test_render.py       渲染：纯文本兜底的结构与"不出 ANSI"
 │  └─ test_session_report.py 会话报告与钩子：不联网，只断言拼出来的东西对不对
 ├─ docs\permission-design.md  审批的设计与决策记录（D1–D6）
@@ -192,7 +220,7 @@ CarryCode\
 
 忘了写 `RISK` 会被测试抓住；而且 `register()` 的缺省值落在"要问"那一边，不会静默放行。
 
-加一个工具 = 新建 `tools/<名字>.py`（`NAME` / `SCHEMA` / `run`）+ 在 `tools/__init__.py` 的 `_MODULES` 末尾加一行，其它文件一个字不用动。
+需要共享状态的工具（比如 `update_plan`）走的是另一条路：工具层不许向上 import，所以状态由会话在启动时 `bind()` 进去，工具只负责接参和转字符串。
 
 ## 已知限制
 

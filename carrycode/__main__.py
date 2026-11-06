@@ -18,6 +18,8 @@
 文件分工：
 
     __main__.py        入口：配置、系统提示、模型请求、回合循环、对话框
+    plan.py            计划状态：存和校验（PlanManager）
+    plan_context.py    把最新清单拼进 system（with_plan_context）
     tools/base.py      公共件：路径、文本读写、参数兜底、共享常量（不 import 任何东西）
     tools/tool.py      花名册 + dispatch（不认识任何具体工具）
     tools/__init__.py  装配：装哪几个工具、按什么顺序（唯一能改顺序的地方）
@@ -42,9 +44,11 @@ from typing import Any
 from . import __version__
 from .hooks import SESSION_END, SESSION_START, Hooks
 from .permissions import Permissions
+from .plan import PlanManager, format_plan
+from .plan_context import with_plan_context
 from .render import render_markdown, rich_available
 from .session_report import SessionStats, make_session_report_hook
-from .tools import TOOL_SCHEMAS, dispatch
+from .tools import TOOL_SCHEMAS, dispatch, update_plan
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # 仓库根，.env 在这里
 
@@ -108,7 +112,11 @@ def system_prompt() -> str:
 # ---------------------------------------------------------------------------
 
 
-def call_model(messages: list[dict[str, Any]], config: dict[str, str]) -> dict[str, Any]:
+def call_model(
+    messages: list[dict[str, Any]],
+    config: dict[str, str],
+    system: str,
+) -> dict[str, Any]:
     base = config["base_url"].rstrip("/")
     if base.endswith("/v1"):
         base = base[: -len("/v1")]
@@ -117,7 +125,7 @@ def call_model(messages: list[dict[str, Any]], config: dict[str, str]) -> dict[s
     body = {
         "model": config["model"],
         "max_tokens": MAX_TOKENS,
-        "system": system_prompt(),
+        "system": system,
         "messages": messages,
         "tools": TOOL_SCHEMAS,
     }
@@ -204,16 +212,25 @@ def _run_steps(
     messages: list[dict[str, Any]],
     config: dict[str, str],
     permissions: Permissions,
+    plan: PlanManager,
     stats: SessionStats | None = None,
 ) -> int:
     """在已有历史上跑一轮：模型 → 工具 → 模型 …，直到 stop_reason 不是 tool_use。
 
+    每次请求前都从 plan 读一份新快照拼进 system；只有这一轮的第一份请求带
+    “当前没有计划”的提示（hint），之后不再重复——一条用户提示只催一次。
+
     stats 只是埋点：记这次请求的 usage 和每个工具的调用结果，判定逻辑不受影响。
     """
-    for _ in range(MAX_STEPS):
+    base_system = system_prompt()
+    for step in range(MAX_STEPS):
         if stats is not None:
             stats.requests += 1
-        data = call_model(messages, config)
+        data = call_model(
+            messages,
+            config,
+            with_plan_context(base_system, plan, hint=step == 0),
+        )
         if stats is not None:
             stats.record_usage(data.get("usage"))
         blocks = [block for block in data.get("content") or [] if isinstance(block, dict)]
@@ -266,19 +283,23 @@ def run_turn(
     task: str,
     config: dict[str, str],
     permissions: Permissions,
+    plan: PlanManager,
     stats: SessionStats | None = None,
 ) -> int:
     """把一条任务追加进历史再跑。
 
     中断或请求出错时，把这一轮追加的消息全撤掉：历史停在上一轮结束的位置，
     既不会留下「user 发了、assistant 没回」，也不会留下只调了工具没回结果的半截。
+
+    计划不跟着回退：它不属于历史，被中断的那一轮里 update_plan 做过的改动留着，
+    下一轮请求照样会把最新清单带上。
     """
     if stats is not None:
         stats.turns += 1
     mark = len(messages)
     messages.append({"role": "user", "content": [{"type": "text", "text": task}]})
     try:
-        return _run_steps(messages, config, permissions, stats)
+        return _run_steps(messages, config, permissions, plan, stats)
     except BaseException:
         del messages[mark:]
         raise
@@ -288,10 +309,11 @@ def run(
     task: str,
     config: dict[str, str],
     permissions: Permissions,
+    plan: PlanManager,
     stats: SessionStats | None = None,
 ) -> int:
     """一次性：跑完就退出（退出码 0 完成 / 1 没跑完）。"""
-    return run_turn([], task, config, permissions, stats)
+    return run_turn([], task, config, permissions, plan, stats)
 
 
 def _prompt() -> str:
@@ -306,12 +328,16 @@ def _prompt() -> str:
 def repl(
     config: dict[str, str],
     permissions: Permissions,
+    plan: PlanManager,
     stats: SessionStats | None = None,
 ) -> int:
     """对话框：一行一条任务，历史一直留着，所以上下文能接着聊。
 
     历史是往下追加的，前面几轮的请求开头原样不动，
     模型服务端的前缀缓存就能接着用。
+
+    计划跟这一场会话绑在一起：/new 换新对话时一起清空；
+    界面要显示进度就读 plan 的快照，不要去聊天记录里找。
     """
     messages: list[dict[str, Any]] = []
 
@@ -335,19 +361,25 @@ def repl(
             return 0
         if line == "/help":
             print("  /help   这条帮助")
-            print("  /new    清空历史，开一段新对话（上下文从头来）")
+            print("  /plan   看当前计划（只读）")
+            print("  /new    清空历史和计划，开一段新对话（上下文从头来）")
             print("  /exit   退出（Ctrl-D 也行）")
             print(f"  其它输入都当任务发给模型；每轮最多 {MAX_STEPS} 次模型请求，Ctrl-C 中断当前轮。")
             print()
             continue
+        if line == "/plan":
+            print(format_plan(plan.snapshot()))
+            print()
+            continue
         if line == "/new":
             messages.clear()
-            print("（历史已清空，接着输入任务）")
+            plan.reset()
+            print("（历史和计划都已清空，接着输入任务）")
             print()
             continue
 
         try:
-            run_turn(messages, line, config, permissions, stats)
+            run_turn(messages, line, config, permissions, plan, stats)
         except KeyboardInterrupt:
             print("（已中断这一轮，历史回到中断前）", file=sys.stderr)
         except RuntimeError as error:
@@ -363,7 +395,7 @@ def repl(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="carrycode",
-        description="CarryCode - 最小 agent loop：6 个工具，带对话框",
+        description="CarryCode - 最小 agent loop：7 个工具，带对话框",
     )
     parser.add_argument("prompt", nargs="*", help="要交给模型的任务；不写就进对话框")
     parser.add_argument("--version", action="store_true", help="打印版本")
@@ -404,6 +436,12 @@ def main(argv: list[str] | None = None) -> int:
         allow_outside=args.allow_outside,
     )
 
+    # 一场会话一个计划：agent loop、update_plan 工具、/plan 共用这一个实例，
+    # 谁也不另外存一份。它只活在内存里，新会话从空清单开始。
+    # 以后加 --resume 时只恢复 messages，不恢复计划（产品文档 S2 的决定）。
+    plan = PlanManager()
+    update_plan.bind(plan)
+
     stats = SessionStats(model=config["model"], workspace=str(Path.cwd()))
     hooks = Hooks()
     hooks.on(SESSION_END, make_session_report_hook())
@@ -416,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         if not task:
             # 没给任务就进对话框
             try:
-                return repl(config, permissions, stats)
+                return repl(config, permissions, plan, stats)
             except KeyboardInterrupt:
                 print()
                 return 0
@@ -424,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"● {config['model']}  ·  {config['base_url']}  ·  {permissions.mode}")
         print()
         try:
-            return run(task, config, permissions, stats)
+            return run(task, config, permissions, plan, stats)
         except KeyboardInterrupt:
             print("\n（已中断）", file=sys.stderr)
             return 130

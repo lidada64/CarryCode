@@ -18,7 +18,7 @@ TOOLS_DIR = Path(__file__).resolve().parent.parent / "carrycode" / "tools"
 
 # 顺序 = 发给模型的顺序。改这里等于改请求开头，会让服务端记住的前缀失效，
 # 所以顺序变化必须是一次明确的、有人盯着的变更。
-EXPECTED_ORDER = ["bash", "read_file", "write_file", "edit_file", "glob", "grep"]
+EXPECTED_ORDER = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "update_plan"]
 
 # 安全账本：每个工具说自己多危险、哪些入参受工作区约束。
 # 这张表就是审批的基础，改它等于改安全边界，必须是一次有人盯着的变更。
@@ -30,6 +30,8 @@ EXPECTED_LEDGER = {
     "edit_file": ("write", ("path",)),
     "glob": ("read", ()),
     "grep": ("read", ("path",)),
+    # 计划只在会话内存里，不碰文件也不执行命令：写 read，不该为它弹审批
+    "update_plan": ("read", ()),
 }
 
 # 这几个文件是册子、公共件和命令知识，不是具体工具，不要求写 RISK
