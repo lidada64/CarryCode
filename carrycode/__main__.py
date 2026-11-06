@@ -40,7 +40,10 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .hooks import SESSION_END, SESSION_START, Hooks
 from .permissions import Permissions
+from .render import render_markdown, rich_available
+from .session_report import SessionStats, make_session_report_hook
 from .tools import TOOL_SCHEMAS, dispatch
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # 仓库根，.env 在这里
@@ -201,17 +204,25 @@ def _run_steps(
     messages: list[dict[str, Any]],
     config: dict[str, str],
     permissions: Permissions,
+    stats: SessionStats | None = None,
 ) -> int:
-    """在已有历史上跑一轮：模型 → 工具 → 模型 …，直到 stop_reason 不是 tool_use。"""
+    """在已有历史上跑一轮：模型 → 工具 → 模型 …，直到 stop_reason 不是 tool_use。
+
+    stats 只是埋点：记这次请求的 usage 和每个工具的调用结果，判定逻辑不受影响。
+    """
     for _ in range(MAX_STEPS):
+        if stats is not None:
+            stats.requests += 1
         data = call_model(messages, config)
+        if stats is not None:
+            stats.record_usage(data.get("usage"))
         blocks = [block for block in data.get("content") or [] if isinstance(block, dict)]
         tool_calls = [block for block in blocks if block.get("type") == "tool_use"]
         text = _text_of(blocks)
         stop_reason = data.get("stop_reason")
 
         if text:
-            print(text)
+            render_markdown(text)
             if stop_reason == "tool_use":
                 print()
 
@@ -240,6 +251,8 @@ def _run_steps(
             mark = "失败" if result["is_error"] else "ok"
             print(f"← {mark} · {len(result['content'])} 字符")
             results.append(result)
+            if stats is not None:
+                stats.record_tool(str(call.get("name") or ""), bool(result["is_error"]))
         # 一轮里的所有 tool_result 必须放在同一条 user 消息里
         messages.append({"role": "user", "content": results})
         print()
@@ -253,24 +266,32 @@ def run_turn(
     task: str,
     config: dict[str, str],
     permissions: Permissions,
+    stats: SessionStats | None = None,
 ) -> int:
     """把一条任务追加进历史再跑。
 
     中断或请求出错时，把这一轮追加的消息全撤掉：历史停在上一轮结束的位置，
     既不会留下「user 发了、assistant 没回」，也不会留下只调了工具没回结果的半截。
     """
+    if stats is not None:
+        stats.turns += 1
     mark = len(messages)
     messages.append({"role": "user", "content": [{"type": "text", "text": task}]})
     try:
-        return _run_steps(messages, config, permissions)
+        return _run_steps(messages, config, permissions, stats)
     except BaseException:
         del messages[mark:]
         raise
 
 
-def run(task: str, config: dict[str, str], permissions: Permissions) -> int:
+def run(
+    task: str,
+    config: dict[str, str],
+    permissions: Permissions,
+    stats: SessionStats | None = None,
+) -> int:
     """一次性：跑完就退出（退出码 0 完成 / 1 没跑完）。"""
-    return run_turn([], task, config, permissions)
+    return run_turn([], task, config, permissions, stats)
 
 
 def _prompt() -> str:
@@ -282,7 +303,11 @@ def _prompt() -> str:
     return "› "
 
 
-def repl(config: dict[str, str], permissions: Permissions) -> int:
+def repl(
+    config: dict[str, str],
+    permissions: Permissions,
+    stats: SessionStats | None = None,
+) -> int:
     """对话框：一行一条任务，历史一直留着，所以上下文能接着聊。
 
     历史是往下追加的，前面几轮的请求开头原样不动，
@@ -322,7 +347,7 @@ def repl(config: dict[str, str], permissions: Permissions) -> int:
             continue
 
         try:
-            run_turn(messages, line, config, permissions)
+            run_turn(messages, line, config, permissions, stats)
         except KeyboardInterrupt:
             print("（已中断这一轮，历史回到中断前）", file=sys.stderr)
         except RuntimeError as error:
@@ -379,24 +404,36 @@ def main(argv: list[str] | None = None) -> int:
         allow_outside=args.allow_outside,
     )
 
-    if not task:
-        # 没给任务就进对话框
-        try:
-            return repl(config, permissions)
-        except KeyboardInterrupt:
-            print()
-            return 0
+    stats = SessionStats(model=config["model"], workspace=str(Path.cwd()))
+    hooks = Hooks()
+    hooks.on(SESSION_END, make_session_report_hook())
+    hooks.emit(SESSION_START, stats=stats)
 
-    print(f"● {config['model']}  ·  {config['base_url']}  ·  {permissions.mode}")
-    print()
+    if not rich_available():
+        print("（没装 rich：markdown 按纯文本显示；pip install rich 后重开即可渲染）", file=sys.stderr)
+
     try:
-        return run(task, config, permissions)
-    except KeyboardInterrupt:
-        print("\n（已中断）", file=sys.stderr)
-        return 130
-    except RuntimeError as error:
-        print(f"✗ {error}", file=sys.stderr)
-        return 1
+        if not task:
+            # 没给任务就进对话框
+            try:
+                return repl(config, permissions, stats)
+            except KeyboardInterrupt:
+                print()
+                return 0
+
+        print(f"● {config['model']}  ·  {config['base_url']}  ·  {permissions.mode}")
+        print()
+        try:
+            return run(task, config, permissions, stats)
+        except KeyboardInterrupt:
+            print("\n（已中断）", file=sys.stderr)
+            return 130
+        except RuntimeError as error:
+            print(f"✗ {error}", file=sys.stderr)
+            return 1
+    finally:
+        # 正常退出、Ctrl-C、请求失败都算会话结束：报告只出一次，放在这里最省心。
+        hooks.emit(SESSION_END, stats=stats)
 
 
 if __name__ == "__main__":

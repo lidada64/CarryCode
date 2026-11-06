@@ -61,6 +61,38 @@ ANTHROPIC_MODEL=deepseek-v4-flash
 
 assistant 的原始 content blocks（含 thinking）原样进历史——DeepSeek 的 Anthropic 兼容端点要求这样回传。
 
+### 回答的渲染
+
+模型的回答是 markdown（标题、列表、表格、代码块），直接 `print` 出去很难读，所以统一走 `carrycode/render.py`：装了 rich 就排成终端样式，没装就退化成纯文本（标题加下划线、去掉行内标记、代码块缩进），两条路都不输出 ANSI，老版 PowerShell 里也不会出现 `←[1m`。
+
+### 会话结束的报告
+
+退出（`/exit`、Ctrl-D、Ctrl-C，或者一次性任务跑完/失败）时会走一次 `session_end`：`carrycode/hooks.py` 喊一声，`carrycode/session_report.py` 把本次统计拼成 markdown 再渲染出来。
+
+```
+# CarryCode 会话报告
+
+| 项目 | 值 |
+| --- | --- |
+| 模型 | deepseek-v4-flash |
+| 任务轮数 | 3 |
+| 模型请求 | 7 |
+
+## 算力
+
+| 输入 tokens | 输出 tokens | 合计 |
+| ---: | ---: | ---: |
+| 18,432 | 2,310 | 20,742 |
+
+## 工具调用
+
+| 工具 | 次数 |
+| --- | ---: |
+| bash | 2 |
+```
+
+装了 `rich` 就按终端样式渲染（`pip install -e .[render]`）；没装就退化成带 ANSI 的纯文本，不报错、不影响退出——默认依赖仍然只有标准库。钩子只做通知：handler 自己出错会被就地吞掉，不会把退出流程一起弄挂。
+
 ### 工具表为什么是常量
 
 工具清单由 `tools/__init__.py` 装配：按固定顺序登记，`TOOL_SCHEMAS` 在加载时算一次，之后每次请求原样发出去。工具顺序、说明文字都不随请求变化，所以请求开头那段逐字相同，服务端的前缀缓存才认得出来——改一个字段，就从那个字往后全部重算。测试里有一条断言盯着这个顺序（`tests/test_architecture.py`）。
@@ -120,7 +152,7 @@ assistant 的原始 content blocks（含 thinking）原样进历史——DeepSee
 python -m unittest discover -s tests -t .
 ```
 
-现在只有架构约束那几条：工具层不许反向 import、工具顺序固定、每个工具都有说明和参数。
+现在有三组：架构约束（工具层不许反向 import、工具顺序固定、每个工具都有说明和参数）、审批判定（假 asker，断言问没问、允不允许）、会话报告与钩子（不联网，断言统计和 markdown 拼得对）。
 
 ## 文件
 
@@ -130,6 +162,9 @@ CarryCode\
 │  ├─ __init__.py          版本号
 │  ├─ __main__.py          入口：配置、系统提示、请求、回合循环、对话框、审批的显示
 │  ├─ permissions.py       审批：三档模式 + 边界 + 记忆，十步判定链（不 print、不 input）
+│  ├─ hooks.py             生命周期钩子：session_start / session_end，出错不影响主流程
+│  ├─ render.py            回答的 markdown 渲染：rich 可用就排版，否则纯文本兜底
+│  ├─ session_report.py    会话统计 → markdown → 交给 render.py 渲染
 │  └─ tools\
 │     ├─ __init__.py       装配：装哪几个工具、按什么顺序（唯一能改顺序的地方）
 │     ├─ tool.py           花名册 + dispatch（不认识任何具体工具）
@@ -144,7 +179,9 @@ CarryCode\
 ├─ tests\
 │  ├─ __init__.py
 │  ├─ test_architecture.py 架构约束：不许反向 import、顺序固定、安全账本
-│  └─ test_permissions.py  审批：全程无终端，用假 asker 断言"问没问、允不允许"
+│  ├─ test_permissions.py  审批：全程无终端，用假 asker 断言"问没问、允不允许"
+│  ├─ test_render.py       渲染：纯文本兜底的结构与"不出 ANSI"
+│  └─ test_session_report.py 会话报告与钩子：不联网，只断言拼出来的东西对不对
 ├─ docs\permission-design.md  审批的设计与决策记录（D1–D6）
 ├─ .env.example            密钥模板
 ├─ run-carrycode.cmd       一键启动，可在任意目录运行
