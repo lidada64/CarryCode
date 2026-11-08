@@ -75,6 +75,13 @@ class SessionStatsTest(unittest.TestCase):
         self.assertEqual(stats.total_tool_calls, 3)
         self.assertEqual(stats.tool_errors, 1)
 
+    def test_requests_are_counted_for_main_and_workers(self):
+        stats = SessionStats()
+        stats.record_request()
+        stats.record_request()
+
+        self.assertEqual(stats.requests, 2)
+
 
 class MarkdownTest(unittest.TestCase):
     def _stats(self) -> SessionStats:
@@ -93,7 +100,7 @@ class MarkdownTest(unittest.TestCase):
 
         self.assertIn("# CarryCode 会话报告", text)
         self.assertIn("deepseek-v4-flash", text)
-        self.assertIn("| 模型请求 | 3 |", text)
+        self.assertIn("| 模型请求（含子 agent） | 3 |", text)
         self.assertIn("| 1,234 | 56 | 1,290 |", text)
         self.assertIn("| bash | 2 |", text)
         self.assertIn("共 3 次，其中失败 1 次。", text)

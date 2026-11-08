@@ -18,7 +18,19 @@ TOOLS_DIR = Path(__file__).resolve().parent.parent / "carrycode" / "tools"
 
 # 顺序 = 发给模型的顺序。改这里等于改请求开头，会让服务端记住的前缀失效，
 # 所以顺序变化必须是一次明确的、有人盯着的变更。
-EXPECTED_ORDER = ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "update_plan"]
+EXPECTED_ORDER = [
+    "bash",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "update_plan",
+    "spawn_agent",
+    "list_agents",
+    "wait_agent",
+    "close_agent",
+]
 
 # 安全账本：每个工具说自己多危险、哪些入参受工作区约束。
 # 这张表就是审批的基础，改它等于改安全边界，必须是一次有人盯着的变更。
@@ -32,10 +44,19 @@ EXPECTED_LEDGER = {
     "grep": ("read", ("path",)),
     # 计划只在会话内存里，不碰文件也不执行命令：写 read，不该为它弹审批
     "update_plan": ("read", ()),
+    # 四个管理工具只动内存里的调查线程：worker 自己只读，不该为它们弹审批
+    "spawn_agent": ("read", ()),
+    "list_agents": ("read", ()),
+    "wait_agent": ("read", ()),
+    "close_agent": ("read", ()),
 }
 
-# 这几个文件是册子、公共件和命令知识，不是具体工具，不要求写 RISK
-NOT_TOOLS = {"__init__.py", "base.py", "tool.py", "commands.py"}
+# 这四个文件是册子、公共件和命令知识，不是具体工具，不要求写 RISK
+NOT_TOOLS = {"__init__.py", "agents.py", "base.py", "tool.py", "commands.py"}
+
+# 只有明确不需要参数的工具可以交一份空参数表；别的工具漏写参数表，
+# 模型就永远不知道该传什么。这张名单要有人盯着，不能顺手加。
+NO_ARG_TOOLS = {"list_agents"}
 
 # 工具层往上指的两写法：相对导入超过一层（from ..），或者直接 import 包本身
 UPWARD_IMPORTS = ("from ..", "import carrycode")
@@ -62,7 +83,12 @@ class ToolsLayeringTest(unittest.TestCase):
             self.assertTrue(spec.get("description"), f"{name} 缺 description")
             schema = spec.get("input_schema") or {}
             self.assertEqual(schema.get("type"), "object", f"{name} 的 input_schema 不是 object")
-            self.assertTrue(schema.get("properties"), f"{name} 没有定义任何参数")
+            if name in NO_ARG_TOOLS:
+                self.assertEqual(
+                    schema.get("properties"), {}, f"{name} 说好不要参数，就别偷偷加"
+                )
+            else:
+                self.assertTrue(schema.get("properties"), f"{name} 没有定义任何参数")
 
 
 class SecurityLedgerTest(unittest.TestCase):

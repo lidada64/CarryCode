@@ -6,10 +6,24 @@
 
 from __future__ import annotations
 
-from . import bash, edit_file, glob, grep, read_file, update_plan, write_file
+from . import (
+    bash,
+    close_agent,
+    edit_file,
+    glob,
+    grep,
+    list_agents,
+    read_file,
+    spawn_agent,
+    update_plan,
+    wait_agent,
+    write_file,
+)
+from .agents import bind as bind_agents
 from .tool import TOOLS, build_schemas, dispatch, register
 
 # 顺序 = 发给模型的顺序。新工具追加到末尾，不要插到中间。
+# 四个管理工具只给主 agent：worker 的清单是 subagents.py 里单独裁的那三个只读工具。
 _MODULES = (
     bash,
     read_file,
@@ -18,6 +32,10 @@ _MODULES = (
     glob,
     grep,
     update_plan,
+    spawn_agent,
+    list_agents,
+    wait_agent,
+    close_agent,
 )
 
 for _module in _MODULES:
@@ -34,4 +52,4 @@ for _module in _MODULES:
 
 TOOL_SCHEMAS = build_schemas()
 
-__all__ = ["TOOL_SCHEMAS", "TOOLS", "dispatch", "update_plan"]
+__all__ = ["TOOL_SCHEMAS", "TOOLS", "bind_agents", "dispatch", "update_plan"]

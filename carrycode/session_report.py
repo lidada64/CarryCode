@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ class SessionStats:
     output_tokens: int = 0
     tool_calls: Counter[str] = field(default_factory=Counter)
     tool_errors: int = 0
+    # 子 agent 在自己的线程里也记请求和 tokens，所以计数要加锁
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     @property
     def elapsed(self) -> float:
@@ -42,17 +45,24 @@ class SessionStats:
     def total_tool_calls(self) -> int:
         return sum(self.tool_calls.values())
 
+    def record_request(self) -> None:
+        """记一次请求（主 agent 和子 agent 都算，见 README 的会话报告一节）。"""
+        with self._lock:
+            self.requests += 1
+
     def record_usage(self, usage: Any) -> None:
         """累加一次模型请求的 usage 块；缺字段就当 0。"""
         if not isinstance(usage, dict):
             return
-        self.input_tokens += _as_int(usage.get("input_tokens"))
-        self.output_tokens += _as_int(usage.get("output_tokens"))
+        with self._lock:
+            self.input_tokens += _as_int(usage.get("input_tokens"))
+            self.output_tokens += _as_int(usage.get("output_tokens"))
 
     def record_tool(self, name: str, is_error: bool) -> None:
-        self.tool_calls[name or "(未知)"] += 1
-        if is_error:
-            self.tool_errors += 1
+        with self._lock:
+            self.tool_calls[name or "(未知)"] += 1
+            if is_error:
+                self.tool_errors += 1
 
 
 def _as_int(value: Any) -> int:
@@ -86,7 +96,7 @@ def build_markdown(stats: SessionStats) -> str:
         f"| 开始时间 | {started} |",
         f"| 时长 | {_fmt_duration(stats.elapsed)} |",
         f"| 任务轮数 | {stats.turns} |",
-        f"| 模型请求 | {stats.requests} |",
+        f"| 模型请求（含子 agent） | {stats.requests} |",
         "",
         "## 算力",
         "",
